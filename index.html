@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ナイトレイン 連勝数チェッカー</title>
+<style>
+:root{
+  --bg:#eceff5; --panel:#ffffff; --ink:#1b2033; --sub:#5d6478; --line:#d3d8e4;
+  --normal:#3f6f9e; --hard:#a4402f; --drop:#e2e7f1;
+  box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1220; --panel:#161b2e; --ink:#e9e8f2; --sub:#9aa1b8; --line:#2b3250;
+    --normal:#7fb0dd; --hard:#e8836b; --drop:#1b2140;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1220; --panel:#161b2e; --ink:#e9e8f2; --sub:#9aa1b8; --line:#2b3250;
+  --normal:#7fb0dd; --hard:#e8836b; --drop:#1b2140;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif;line-height:1.7}
+main{max-width:680px;margin:0 auto;padding:40px 18px 56px}
+h1{font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif;
+  font-size:1.9rem;font-weight:700;letter-spacing:.04em;margin:0 0 6px}
+.lead{margin:0 0 28px;color:var(--sub);font-size:.95rem}
+#drop{display:block;border:2px dashed var(--line);background:var(--drop);border-radius:6px;
+  padding:34px 18px;text-align:center;cursor:pointer}
+#drop:hover,#drop.over,#drop:focus-within{border-color:var(--normal)}
+#drop strong{display:block;font-size:1.05rem;margin-bottom:4px}
+#drop span{color:var(--sub);font-size:.88rem}
+#file{position:absolute;opacity:0;width:1px;height:1px}
+#status{min-height:1.6em;margin:16px 0 0;color:var(--sub);font-size:.92rem}
+#status.err{color:var(--hard)}
+.slot{background:var(--panel);border:1px solid var(--line);border-radius:6px;margin-top:16px;padding:18px 20px}
+.slot h2{margin:0 0 12px;font-size:1.1rem;font-weight:700;overflow-wrap:anywhere}
+.slot h2 small{font-weight:400;color:var(--sub);font-size:.8rem;margin-left:8px}
+.modes{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.mode{border-left:4px solid var(--c);padding-left:14px}
+.mode .t{font-size:.85rem;color:var(--sub)}
+.mode .cur{font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif;
+  font-size:3rem;font-weight:700;line-height:1.1;color:var(--c)}
+.mode .cur i{font-style:normal;font-size:.9rem;font-weight:400;color:var(--sub);margin-left:4px}
+.mode .max{font-size:.88rem;color:var(--sub)}
+.normal{--c:var(--normal)} .hard{--c:var(--hard)}
+.note{margin-top:28px;color:var(--sub);font-size:.84rem}
+.note p{margin:4px 0}
+code{font-size:.85em;overflow-wrap:anywhere}
+@media (max-width:460px){.modes{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>ナイトレイン 連勝数チェッカー</h1>
+  <p class="lead">セーブデータを選ぶと、キャラクターごとの現在の連勝数と最高連勝数を表示します。</p>
+
+  <label id="drop" for="file">
+    <strong>NR0000.sl2 をここに置くか、クリックして選ぶ</strong>
+    <span>ファイルはこのブラウザの中だけで処理され、外部には送信されません。</span>
+  </label>
+  <input id="file" type="file">
+  <p id="status" role="status"></p>
+  <div id="result"></div>
+
+  <div class="note">
+    <p>セーブデータの場所: <code>%APPDATA%\Nightreign\（SteamIDの数字）\NR0000.sl2</code></p>
+  </div>
+</main>
+
+<script>
+
+const KEY_BYTES = new Uint8Array([0x18,0xF6,0x32,0x66,0x05,0xBD,0x17,0x8A,0x55,0x24,0x52,0x3A,0xC0,0xA0,0xC6,0x09]);
+const NAME_SIG = new Uint8Array([0x27,0x00,0x00,0x46,0x41,0x43,0x45]);
+const NAME_TO_HARD = 56261;
+
+const $ = id => document.getElementById(id);
+
+function indexOf(h, n, from = 0) {
+  const m = n.length, first = n[0];
+  for (let i = from; i <= h.length - m; i++) {
+    if (h[i] !== first) continue;
+    let j = 1;
+    while (j < m && h[i + j] === n[j]) j++;
+    if (j === m) return i;
+  }
+  return -1;
+}
+
+async function decrypt(key, iv, enc) {
+  const last = enc.subarray(enc.length - 16);
+  const x = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) x[i] = 0x10 ^ last[i];
+  const e = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-CBC", iv: new Uint8Array(16) }, key, x));
+  const full = new Uint8Array(enc.length + 16);
+  full.set(enc, 0);
+  full.set(e.subarray(0, 16), enc.length);
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, full));
+}
+
+function readEntries(buf) {
+  const b = new Uint8Array(buf);
+  if (b.length < 16 || b[0] !== 0x42 || b[1] !== 0x4E || b[2] !== 0x44 || b[3] !== 0x34) {
+    throw new Error("セーブデータの形式が違います。NR0000.sl2 を選んでください。");
+  }
+  const dv = new DataView(buf);
+  const num = dv.getInt32(12, true);
+  const map = new Map();
+  for (let i = 0; i < num; i++) {
+    const pos = 64 + i * 32;
+    if (pos + 32 > b.length) continue;
+    if (!(b[pos] === 0x40 && b[pos + 4] === 0xFF)) continue;
+    const size = dv.getInt32(pos + 8, true);
+    const off = dv.getInt32(pos + 16, true);
+    if (size < 32 || (size - 16) % 16 !== 0 || off + size > b.length) continue;
+    map.set(i, { iv: b.slice(off, off + 16), enc: b.subarray(off + 16, off + size) });
+  }
+  return map;
+}
+
+function getNames(data) {
+  const names = [];
+  let from = 0;
+  for (let i = 0; i < 10; i++) {
+    const sig = indexOf(data, NAME_SIG, from);
+    if (sig < 0) break;
+    from = sig + NAME_SIG.length;
+    const p = sig - 51;
+    if (p < 0) continue;
+    let end = -1;
+    for (let j = p; j + 1 < data.length; j++) {
+      if (data[j] === 0 && data[j + 1] === 0) { end = j; break; }
+    }
+    if (end < 0) break;
+    const len = end + 1 - p;
+    if (len <= 0) continue;
+    names.push(new TextDecoder("utf-16le").decode(data.subarray(p, p + len)).replace(/\0+$/, ""));
+  }
+  return names;
+}
+
+function findBlock(data, name) {
+  if (!name) return null;
+  const pat = [];
+  for (let i = 0; i < name.length; i++) { const c = name.charCodeAt(i); pat.push(c & 255, c >> 8); }
+  pat.push(0, 0);
+  const pattern = new Uint8Array(pat);
+  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let from = 0;
+  for (let hit = 0; hit < 100; hit++) {
+    const at = indexOf(data, pattern, from);
+    if (at < 0) break;
+    from = at + 1;
+    const p = at + NAME_TO_HARD;
+    if (p < 8 || p + 16 > data.length) continue;
+    const nc = dv.getInt32(p - 8, true), nm = dv.getInt32(p - 4, true);
+    const hc = dv.getInt32(p, true), hm = dv.getInt32(p + 4, true);
+    const w = dv.getInt32(p + 12, true);
+    if (w !== 5) continue;
+    if (nc < 0 || nc > nm || nm > 100000) continue;
+    if (hc < 0 || hc > hm || hm > 100000) continue;
+    return { nc, nm, hc, hm };
+  }
+  return null;
+}
+
+async function analyze(buf) {
+  const entries = readEntries(buf);
+  const key = await crypto.subtle.importKey("raw", KEY_BYTES, "AES-CBC", false, ["encrypt", "decrypt"]);
+  const get = async i => { const e = entries.get(i); return e ? decrypt(key, e.iv, e.enc) : null; };
+
+  const nameData = await get(10);
+  if (!nameData) throw new Error("キャラクター名の領域が見つかりませんでした。");
+  const names = getNames(nameData);
+  if (!names.length) throw new Error("キャラクターが見つかりませんでした。");
+
+  const list = [];
+  for (let i = 0; i < names.length; i++) {
+    const data = await get(i);
+    list.push({ slot: i, name: names[i], block: data ? findBlock(data, names[i]) : null });
+  }
+  return list;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function modeBox(cls, title, cur, max) {
+  const box = el("div", "mode " + cls);
+  box.append(el("div", "t", title));
+  const c = el("div", "cur", String(cur));
+  c.append(el("i", "", "連勝中"));
+  box.append(c, el("div", "max", "最高連勝数 " + max));
+  return box;
+}
+
+function render(list) {
+  const root = $("result");
+  root.replaceChildren();
+  const missed = [];
+  for (const r of list) {
+    if (!r.block) { missed.push(r.name); continue; }
+    const card = el("section", "slot");
+    const h = el("h2", "", r.name);
+    h.append(el("small", "", "スロット " + r.slot));
+    const modes = el("div", "modes");
+    modes.append(
+      modeBox("normal", "浅き夜", r.block.nc, r.block.nm),
+      modeBox("hard", "深き夜", r.block.hc, r.block.hm)
+    );
+    card.append(h, modes);
+    root.append(card);
+  }
+  const s = $("status");
+  s.className = "";
+  s.textContent = missed.length
+    ? "読み取れなかったキャラクター: " + missed.join("、") + "（削除済みのデータの可能性があります）"
+    : "読み取りが完了しました。";
+}
+
+async function handleFile(file) {
+  const s = $("status");
+  s.className = "";
+  s.textContent = "読み取り中です…";
+  $("result").replaceChildren();
+  try {
+    if (!(window.crypto && crypto.subtle)) throw new Error("このブラウザでは復号機能を使えません。最新の Chrome か Edge で開いてください。");
+    render(await analyze(await file.arrayBuffer()));
+  } catch (err) {
+    s.className = "err";
+    s.textContent = err.message || "読み取りに失敗しました。";
+  }
+}
+
+$("file").addEventListener("change", e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+const drop = $("drop");
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => { if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+</script>
+</body>
+</html>
